@@ -1,0 +1,122 @@
+/*電流メータ
+* 2024/10/04 (C) K.Ikeda
+*/
+ 
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+#include <math.h>           //pow sqrt
+#include <sys types.h="">       // open
+#include <sys stat.h="">        // open
+#include <fcntl.h>          // open
+#include <unistd.h>         // read/write usleep
+#include <stdlib.h>         // exit
+#include <inttypes.h>       // uint8_t, etc
+#include <linux i2c-dev.h="">   // (1) I2C bus definitions
+ 
+//(2)
+void set_config_register(int I2CFile, uint8_t registerByte[],int mux, int pga, int dr);
+//(3)
+double read_current_rms(int I2CFile, uint8_t registerByte[], double FS, int N, double R);
+ 
+int main() {
+     
+    time_t timer;
+    struct tm *date;
+    char date_time[256];
+    char year_date[256];
+    uint8_t registerByte[3];    // I2C register　3バイトト
+    int I2CFile;
+    double i_rms0;
+    double i_rms1;
+     
+    int ads_address = 0x48; //I2Cデバイスアドレス ADDR端子をグランドに接続した場合
+    int mux = 0b000;        //入力端子の指定　0b100でAIN = 0　0b101でAIN = 1
+    int pga = 0b001;        //PGA値 0b001,0b010,0b011,0b100のいずれか
+    int dr = 0b111;         //データレート860SPSの場合
+    double R = 300;         //電流センサーの負荷抵抗値（Ω）
+    int N = 3000;           //電流センサーの巻き線比
+    double FS;              //フルスケール値
+    if (pga >= 0b001 & pga <= 0b100){
+        FS = 4.096 / pow(2.0 , pga -1);//PGAからフルスケール値に変換
+    }else{
+        printf("Error: Couldn't convert to FS! \n");
+        return 1;
+    }
+     
+    // /dev/i2c-1 のI2Cデバイスを開く
+    if ((I2CFile = open("/dev/i2c-1", O_RDWR)) < 0) {
+        printf("Error: Couldn't open device! %d\n", I2CFile);
+        return 1;
+    }
+    // ads1115 をスレーブモードに設定
+    if (ioctl(I2CFile, I2C_SLAVE, ads_address) < 0) {
+        printf("Error: Couldn't find device on address!\n");
+        return 1;
+    }
+   
+    //タイマー設定
+    timer = time(NULL); 
+    strftime(date_time, 255, "%Y/%m/%d %H:%M:%S", localtime(&timer));  
+    printf("measurement start %s\n",date_time);
+     
+    while (1){ //(4)無限ループ
+        //channel 0
+        mux = 0b100;//AIN = 0
+        set_config_register(I2CFile, registerByte, mux, pga, dr);
+        i_rms0 = read_current_rms(I2CFile, registerByte,  FS,  N, R);
+         
+        //channel 1
+        mux = 0b101;//AIN = 1
+        set_config_register(I2CFile, registerByte, mux, pga, dr);
+        i_rms1 = read_current_rms(I2CFile, registerByte,  FS,  N, R);
+                     
+        //(5)ファイル出力　1日1本
+        timer = time(NULL);                
+        strftime(year_date, 255, "%Y%m%d", localtime(&timer));
+        char filename[256] = "wattmeter/";  
+        strcat( filename, year_date );
+        strcat( filename, "wattmeter.txt" );
+        FILE *fp;
+        char *fname = filename;    
+        fp = fopen( fname, "a" ); //追記形でオープン
+        strftime(date_time, 255, "%Y/%m/%d %H:%M:%S", localtime(&timer));
+        fprintf( fp ,"%s, %.6f, %.6f\n",date_time, i_rms0 * 100.0 , i_rms1 * 100.0);//電圧は100vとしワット数を計算
+        printf( "%s, %.6f, %.6f\n",date_time, i_rms0 * 100.0 , i_rms1 * 100.0);
+        fclose( fp );
+ 
+    }
+    close(I2CFile);
+ 
+    return 0;
+}
+ 
+//(2)
+void set_config_register(int I2CFile, uint8_t registerByte[],int mux, int pga, int dr) {
+ 
+    registerByte[0] = 1;                        // 変換レジスタ を指定
+    registerByte[1] = 0x80 | mux<<4 | pga<<1 ;  //変換レジスタの上位バイトに、mux,pgaを設定
+    registerByte[2] = 0x03 | dr<<5 ;          //変換レジスタの下位バイトに、データレート設定
+    write(I2CFile, registerByte, 3);            // 変換レジスタに書き込み
+}
+ 
+//(3)
+double read_current_rms(int I2CFile, uint8_t registerByte[], double FS, int N, double R) {
+    int NUMBER = 1400;      //サンプリング数 クロックの速いCPUの場合は変更必要
+    double sum = 0.0;       //二乗和
+    int data = 0;
+    int val;
+    double e;
+    double i;
+    registerByte[0] = 0;                    // 変換レジスタ を指定
+    write(I2CFile, registerByte, 1);
+    while (data < NUMBER ){  
+        read(I2CFile, registerByte, 2);     // 変換レジスタを読み込み         
+        val = ((registerByte[0] + 128) % 256 -128) * 256 + registerByte[1]; //2の補数形式を変換
+        e = (double)val * FS / 32768.0; //2次側電圧値
+        i = e * (double)N / R;          //巻き線比と抵抗値から1次側電流値を求める
+        sum = sum + pow(i , 2.0);
+        data = data + 1;
+    }
+    return ( sqrt(sum / (double)data));//二乗平均平方根
+}</linux></inttypes.h></stdlib.h></unistd.h></fcntl.h></sys></sys></math.h></time.h></string.h></stdio.h>
